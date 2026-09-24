@@ -12,6 +12,9 @@ import {
   Contract,
   nativeToScVal,
   scValToNative,
+  xdr,
+  Address,
+  Asset,
   type Account,
 } from "@stellar/stellar-sdk";
 import type { DestinationDelivery } from "./relayer.js";
@@ -27,6 +30,8 @@ export interface SorobanDeliveryConfig {
   settlementContractId: string;
   /** Signer keypair or secret key for submitting transactions. */
   signerSecret: string;
+  /** EVM escrow contract address on the source chain (for peer fallback). */
+  escrowAddress?: string;
 }
 
 /**
@@ -209,32 +214,183 @@ export class SorobanDestinationDelivery implements DestinationDelivery {
     }
   }
 
+  private async getPeer(srcEid: number): Promise<Buffer | null> {
+    try {
+      const contract = new Contract(this.settlementContractId);
+      const account = await this.getSignerAccount();
+      const tx = new TransactionBuilder(account, {
+        fee: "100",
+        networkPassphrase: this.networkPassphrase,
+      })
+        .addOperation(contract.call("get_peer", nativeToScVal(srcEid, { type: "u32" })))
+        .setTimeout(30)
+        .build();
+
+      const simulated = await this.rpc.simulateTransaction(tx);
+      if (!SorobanRpc.Api.isSimulationSuccess(simulated) || !simulated.result) return null;
+      const native = scValToNative(simulated.result.retval);
+      if (Buffer.isBuffer(native) && native.length === 32) return native;
+      if (native instanceof Uint8Array && native.length === 32) return Buffer.from(native);
+      return null;
+    } catch {
+      return null;
+    }
+  }
+
+  private resolveDestAssetScVal(destAsset: string): xdr.ScVal {
+    try {
+      if (destAsset === "native" || !destAsset) {
+        const contractId = Asset.native().contractId(this.networkPassphrase);
+        return new Address(contractId).toScVal();
+      }
+      if (destAsset.includes(":")) {
+        const [code, issuer] = destAsset.split(":");
+        if (code && issuer) {
+          const contractId = new Asset(code, issuer).contractId(this.networkPassphrase);
+          return new Address(contractId).toScVal();
+        }
+      }
+      return new Address(destAsset).toScVal();
+    } catch {
+      return nativeToScVal(destAsset, { type: "address" });
+    }
+  }
+
   private async appendLzReceiveCall(
     builder: TransactionBuilder,
     pending: PendingMessage,
   ): Promise<TransactionBuilder> {
-    const { message, srcTxHash } = pending;
-    const { srcEid, dstEid, intentHash, solver, recipient, destAsset, amount, nonce } = message;
+    const { message } = pending;
+    const { srcEid, intentHash, solver, recipient, destAsset, amount, nonce, messageType } = message;
 
     const contract = new Contract(this.settlementContractId);
 
-    // Build contract invocation arguments
-    // These correspond to the settlement contract's lz_receive interface
-    const args = [
-      nativeToScVal(srcEid, { type: "u32" }),
-      nativeToScVal(dstEid, { type: "u32" }),
-      nativeToScVal(intentHash, { type: "bytes" }),
-      nativeToScVal(solver, { type: "string" }),
-      nativeToScVal(recipient, { type: "string" }),
-      nativeToScVal(destAsset, { type: "string" }),
-      nativeToScVal(amount, { type: "u128" }),
-      nativeToScVal(nonce, { type: "u64" }),
-    ];
+    // 1. Resolve peer sender (Origin.sender: BytesN<32>)
+    let senderBytes = await this.getPeer(srcEid);
+    if (!senderBytes) {
+      senderBytes = evmAddressTo32Bytes(this.config.escrowAddress);
+    }
+
+    // 2. Build Origin struct
+    // struct Origin { nonce: u64, sender: BytesN<32>, src_eid: u32 }
+    // Soroban struct map entries must be sorted alphabetically by field name:
+    // "nonce" < "sender" < "src_eid"
+    const originScVal = xdr.ScVal.scvMap([
+      new xdr.ScMapEntry({
+        key: xdr.ScVal.scvSymbol("nonce"),
+        val: nativeToScVal(BigInt(nonce), { type: "u64" }),
+      }),
+      new xdr.ScMapEntry({
+        key: xdr.ScVal.scvSymbol("sender"),
+        val: xdr.ScVal.scvBytes(senderBytes),
+      }),
+      new xdr.ScMapEntry({
+        key: xdr.ScVal.scvSymbol("src_eid"),
+        val: nativeToScVal(srcEid, { type: "u32" }),
+      }),
+    ]);
+
+    // 3. Build GUID (BytesN<32>)
+    const guidScVal = xdr.ScVal.scvBytes(Buffer.alloc(32));
+
+    // 4. Build LzMessage enum: FillInstruction or Cancel
+    const cleanHash = intentHash.startsWith("0x") ? intentHash.slice(2) : intentHash;
+    const hashBytes = Buffer.from(cleanHash.padStart(64, "0"), "hex");
+
+    let messageScVal: xdr.ScVal;
+
+    if (messageType === "CancelIntent") {
+      // struct CancelInstruction { intent_hash: BytesN<32>, reason: u32 }
+      // Sorted keys: "intent_hash" < "reason"
+      const cancelScVal = xdr.ScVal.scvMap([
+        new xdr.ScMapEntry({
+          key: xdr.ScVal.scvSymbol("intent_hash"),
+          val: xdr.ScVal.scvBytes(hashBytes),
+        }),
+        new xdr.ScMapEntry({
+          key: xdr.ScVal.scvSymbol("reason"),
+          val: nativeToScVal(0, { type: "u32" }),
+        }),
+      ]);
+      messageScVal = xdr.ScVal.scvVec([
+        xdr.ScVal.scvSymbol("Cancel"),
+        cancelScVal,
+      ]);
+    } else {
+      // FillInstruction
+      const recipientAddress = toAddressScVal(recipient);
+      const destAssetAddress = this.resolveDestAssetScVal(destAsset);
+      const preferredSolverScVal =
+        solver && (solver.startsWith("G") || solver.startsWith("C"))
+          ? toAddressScVal(solver)
+          : xdr.ScVal.scvVoid();
+
+      // struct FillInstruction sorted keys:
+      // "deadline", "dest_asset", "intent_hash", "min_dest_amount",
+      // "preferred_solver", "recipient", "reservation_window", "src_eid"
+      const fillScVal = xdr.ScVal.scvMap([
+        new xdr.ScMapEntry({
+          key: xdr.ScVal.scvSymbol("deadline"),
+          val: nativeToScVal(0n, { type: "u64" }),
+        }),
+        new xdr.ScMapEntry({
+          key: xdr.ScVal.scvSymbol("dest_asset"),
+          val: destAssetAddress,
+        }),
+        new xdr.ScMapEntry({
+          key: xdr.ScVal.scvSymbol("intent_hash"),
+          val: xdr.ScVal.scvBytes(hashBytes),
+        }),
+        new xdr.ScMapEntry({
+          key: xdr.ScVal.scvSymbol("min_dest_amount"),
+          val: nativeToScVal(BigInt(amount || "0"), { type: "i128" }),
+        }),
+        new xdr.ScMapEntry({
+          key: xdr.ScVal.scvSymbol("preferred_solver"),
+          val: preferredSolverScVal,
+        }),
+        new xdr.ScMapEntry({
+          key: xdr.ScVal.scvSymbol("recipient"),
+          val: recipientAddress,
+        }),
+        new xdr.ScMapEntry({
+          key: xdr.ScVal.scvSymbol("reservation_window"),
+          val: nativeToScVal(0n, { type: "u64" }),
+        }),
+        new xdr.ScMapEntry({
+          key: xdr.ScVal.scvSymbol("src_eid"),
+          val: nativeToScVal(srcEid, { type: "u32" }),
+        }),
+      ]);
+
+      messageScVal = xdr.ScVal.scvVec([
+        xdr.ScVal.scvSymbol("FillInstruction"),
+        fillScVal,
+      ]);
+    }
 
     builder.addOperation(
-      contract.call("lz_receive", ...args),
+      contract.call("lz_receive", originScVal, guidScVal, messageScVal),
     );
 
     return builder;
   }
+}
+
+function toAddressScVal(addr: string): xdr.ScVal {
+  try {
+    return new Address(addr).toScVal();
+  } catch {
+    return nativeToScVal(addr, { type: "address" });
+  }
+}
+
+function evmAddressTo32Bytes(address?: string): Buffer {
+  const buf = Buffer.alloc(32);
+  if (!address) return buf;
+  const clean = address.startsWith("0x") ? address.slice(2) : address;
+  if (clean.length === 40) {
+    Buffer.from(clean, "hex").copy(buf, 0);
+  }
+  return buf;
 }

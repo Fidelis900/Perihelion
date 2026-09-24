@@ -66,6 +66,7 @@ async function main(): Promise<void> {
     networkPassphrase: config.stellarNetwork,
     settlementContractId: config.settlementContractId,
     signerSecret: config.signerSecret,
+    escrowAddress: config.escrowAddress,
   });
 
   const checkpoint = new FileCheckpointStore(
