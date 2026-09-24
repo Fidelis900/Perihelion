@@ -272,8 +272,29 @@ class RetryStateLRU {
 // Solver
 // ---------------------------------------------------------------------------
 
+const MAX_UNRECOVERABLE_FAILURES = 3;
+
+function isUnrecoverableError(err: unknown): boolean {
+  if (
+    err instanceof TypeError ||
+    err instanceof RangeError ||
+    err instanceof SyntaxError ||
+    err instanceof URIError
+  ) {
+    return true;
+  }
+  if (
+    err instanceof Error &&
+    (err.name === "PerihelionValidationError" || err.name === "ValidationError")
+  ) {
+    return true;
+  }
+  return false;
+}
+
 export class Solver {
   private readonly client: PerihelionClient;
+  private consecutiveUnrecoverableFailures = 0;
 
   /**
    * `seen` tracks hashes whose outcome is terminal (filled, or exhausted
@@ -354,10 +375,26 @@ export class Solver {
       try {
         await this.tick();
         this.backoff.recordSuccess();
+        this.consecutiveUnrecoverableFailures = 0;
       } catch (err) {
         if (err instanceof FatalError) {
           this.log.error("fatal error, solver stopping", { err: String(err) });
           throw err;
+        }
+        if (isUnrecoverableError(err)) {
+          this.consecutiveUnrecoverableFailures += 1;
+          if (this.consecutiveUnrecoverableFailures >= MAX_UNRECOVERABLE_FAILURES) {
+            this.log.error("repeated unrecoverable error in poll loop, escalating to fatal", {
+              err: String(err),
+              consecutiveUnrecoverableFailures: this.consecutiveUnrecoverableFailures,
+            });
+            throw new FatalError(
+              `Repeated unrecoverable error in poll loop: ${String(err)}`,
+              err,
+            );
+          }
+        } else {
+          this.consecutiveUnrecoverableFailures = 0;
         }
         this.backoff.recordFailure();
         this.log.error("tick failed", {
@@ -448,8 +485,6 @@ export class Solver {
         },
       );
     }
-
-    await Promise.allSettled(tasks);
   }
 
   /**
