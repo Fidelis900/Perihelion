@@ -36,7 +36,16 @@ async function main(): Promise<void> {
   // binds to loopback by default and supports optional bearer-token auth —
   // widen or open it up only deliberately.
   const metricsPort = Number(process.env.PERIHELION_METRICS_PORT ?? 9090);
-  const metricsHost = process.env.PERIHELION_HEALTH_HOST ?? "127.0.0.1";
+  let metricsHost = process.env.PERIHELION_METRICS_HOST;
+  if (!metricsHost && process.env.PERIHELION_HEALTH_HOST) {
+    log.warn(
+      "PERIHELION_HEALTH_HOST is deprecated for the solver; use PERIHELION_METRICS_HOST instead",
+    );
+    metricsHost = process.env.PERIHELION_HEALTH_HOST;
+  }
+  if (!metricsHost) {
+    metricsHost = "127.0.0.1";
+  }
   const metricsToken = process.env.PERIHELION_METRICS_TOKEN || undefined;
   const isAuthorized = (authHeader: string | undefined): boolean => {
     if (!metricsToken) return true;
