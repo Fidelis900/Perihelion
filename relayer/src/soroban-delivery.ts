@@ -32,6 +32,8 @@ export interface SorobanDeliveryConfig {
   signerSecret: string;
   /** EVM escrow contract address on the source chain (for peer fallback). */
   escrowAddress?: string;
+  /** Transaction timeout in seconds (default 30). */
+  timeoutSeconds?: number;
 }
 
 /**
@@ -44,6 +46,7 @@ export class SorobanDestinationDelivery implements DestinationDelivery {
   private settlementContractId: string;
   private signerSecret: string;
   private signerKeypair: Keypair;
+  private timeoutSeconds: number;
 
   constructor(private config: SorobanDeliveryConfig) {
     this.rpc = new SorobanRpc.Server(config.rpcUrl);
@@ -51,6 +54,7 @@ export class SorobanDestinationDelivery implements DestinationDelivery {
     this.settlementContractId = config.settlementContractId;
     this.signerSecret = config.signerSecret;
     this.signerKeypair = Keypair.fromSecret(config.signerSecret);
+    this.timeoutSeconds = config.timeoutSeconds ?? 30;
   }
 
   async deliver(pending: PendingMessage): Promise<string> {
@@ -75,6 +79,7 @@ export class SorobanDestinationDelivery implements DestinationDelivery {
       // 5. Append lz_receive invocation
       builder = await this.appendLzReceiveCall(builder, pending);
 
+      builder.setTimeout(this.timeoutSeconds);
       let transaction = builder.build();
 
       // 6. Simulate and prepare the transaction
@@ -151,7 +156,7 @@ export class SorobanDestinationDelivery implements DestinationDelivery {
       networkPassphrase: this.networkPassphrase,
     })
       .addOperation(contract.call("status", nativeToScVal(intentHash, { type: "bytes" })))
-      .setTimeout(30)
+      .setTimeout(this.timeoutSeconds)
       .build();
 
     const simulated = await this.rpc.simulateTransaction(tx);
@@ -223,7 +228,7 @@ export class SorobanDestinationDelivery implements DestinationDelivery {
         networkPassphrase: this.networkPassphrase,
       })
         .addOperation(contract.call("get_peer", nativeToScVal(srcEid, { type: "u32" })))
-        .setTimeout(30)
+        .setTimeout(this.timeoutSeconds)
         .build();
 
       const simulated = await this.rpc.simulateTransaction(tx);

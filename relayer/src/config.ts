@@ -37,6 +37,8 @@ export interface RelayerConfig {
    * best-effort `"refunded"` reporting after `CancelIntent` delivery.
    */
   readonly mempoolStatusToken?: string;
+  /** Stellar transaction timeout in seconds. Defaults to 30. */
+  readonly txTimeoutSeconds?: number;
 }
 
 /** 0x-prefixed 20-byte EVM address. */
@@ -160,6 +162,13 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): RelayerConfig 
     );
   }
 
+  const txTimeoutSeconds = Number(env.PERIHELION_TX_TIMEOUT_SECONDS ?? 30);
+  if (Number.isNaN(txTimeoutSeconds) || txTimeoutSeconds <= 0 || !Number.isInteger(txTimeoutSeconds)) {
+    errors.push(
+      `PERIHELION_TX_TIMEOUT_SECONDS must be a positive integer, got: "${env.PERIHELION_TX_TIMEOUT_SECONDS}"`,
+    );
+  }
+
   if (errors.length > 0) {
     throw new Error(
       `Relayer configuration error — fix the following before starting:\n  • ${errors.join("\n  • ")}`,
@@ -184,5 +193,6 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): RelayerConfig 
     signerSecret,
     mempoolUrl,
     mempoolStatusToken,
+    txTimeoutSeconds,
   };
 }
