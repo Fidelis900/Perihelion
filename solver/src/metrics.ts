@@ -86,7 +86,14 @@ export class SolverMetrics implements Metrics {
     this.corridor(destAsset).fillsLost += 1;
   }
 
+  private static readonly MAX_SKIP_REASONS = 100;
+
   recordSkip(reason: string): void {
+    if (!this.skipReasons.has(reason) && this.skipReasons.size >= SolverMetrics.MAX_SKIP_REASONS) {
+      // Bound the map cardinality to prevent unbounded growth from arbitrary input
+      this.skipReasons.set("other", (this.skipReasons.get("other") ?? 0) + 1);
+      return;
+    }
     this.skipReasons.set(reason, (this.skipReasons.get(reason) ?? 0) + 1);
   }
 
@@ -112,6 +119,19 @@ export class SolverMetrics implements Metrics {
   }
 
   /**
+   * Escape label values according to Prometheus text exposition format:
+   * backslash (\) -> \\
+   * double-quote (") -> \"
+   * newline (\n) -> \n
+   */
+  private escapeLabelValue(val: string): string {
+    return val
+      .replace(/\\/g, "\\\\")
+      .replace(/"/g, '\\"')
+      .replace(/\n/g, "\\n");
+  }
+
+  /**
    * Render a Prometheus-style plain-text exposition so the metrics endpoint
    * can serve it as `text/plain; version=0.0.4`.
    */
@@ -119,18 +139,38 @@ export class SolverMetrics implements Metrics {
     const lines: string[] = [];
     const snap = this.snapshot();
 
+    lines.push("# HELP solver_fills_attempted Total fills attempted per destination asset");
+    lines.push("# TYPE solver_fills_attempted counter");
     for (const [asset, c] of Object.entries(snap.corridors)) {
-      const label = `asset="${asset}"`;
-      lines.push(`solver_fills_attempted{${label}} ${c.fillsAttempted}`);
-      lines.push(`solver_fills_won{${label}} ${c.fillsWon}`);
-      lines.push(`solver_fills_lost{${label}} ${c.fillsLost}`);
-      lines.push(`solver_realized_profit_units{${label}} ${c.realizedProfitSmallestUnits}`);
+      lines.push(`solver_fills_attempted{asset="${this.escapeLabelValue(asset)}"} ${c.fillsAttempted}`);
     }
 
+    lines.push("# HELP solver_fills_won Fills successfully settled on-chain per destination asset");
+    lines.push("# TYPE solver_fills_won counter");
+    for (const [asset, c] of Object.entries(snap.corridors)) {
+      lines.push(`solver_fills_won{asset="${this.escapeLabelValue(asset)}"} ${c.fillsWon}`);
+    }
+
+    lines.push("# HELP solver_fills_lost Fills that failed on-chain or threw an executor error per destination asset");
+    lines.push("# TYPE solver_fills_lost counter");
+    for (const [asset, c] of Object.entries(snap.corridors)) {
+      lines.push(`solver_fills_lost{asset="${this.escapeLabelValue(asset)}"} ${c.fillsLost}`);
+    }
+
+    lines.push("# HELP solver_realized_profit_units Realized profit sum in destination asset smallest units");
+    lines.push("# TYPE solver_realized_profit_units counter");
+    for (const [asset, c] of Object.entries(snap.corridors)) {
+      lines.push(`solver_realized_profit_units{asset="${this.escapeLabelValue(asset)}"} ${c.realizedProfitSmallestUnits}`);
+    }
+
+    lines.push("# HELP solver_fees_total_wei Total fees paid in wei");
+    lines.push("# TYPE solver_fees_total_wei counter");
     lines.push(`solver_fees_total_wei ${snap.totalFeesWei}`);
 
+    lines.push("# HELP solver_skips_total Total intents skipped grouped by reason or code");
+    lines.push("# TYPE solver_skips_total counter");
     for (const [reason, count] of Object.entries(snap.skipReasons)) {
-      lines.push(`solver_skips_total{reason="${reason}"} ${count}`);
+      lines.push(`solver_skips_total{reason="${this.escapeLabelValue(reason)}"} ${count}`);
     }
 
     return lines.join("\n") + "\n";

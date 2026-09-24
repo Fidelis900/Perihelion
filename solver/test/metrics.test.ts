@@ -87,3 +87,31 @@ test("snapshot is a defensive copy (mutations don't affect later snapshots)", ()
   const snap2 = m.snapshot();
   assert.equal(snap2.corridors[ASSET]?.fillsAttempted, 1);
 });
+
+test("toPrometheusText includes HELP and TYPE lines for all series", () => {
+  const m = new SolverMetrics();
+  const text = m.toPrometheusText();
+  assert.ok(text.includes("# HELP solver_fills_attempted"));
+  assert.ok(text.includes("# TYPE solver_fills_attempted counter"));
+  assert.ok(text.includes("# HELP solver_fees_total_wei"));
+  assert.ok(text.includes("# TYPE solver_fees_total_wei counter"));
+  assert.ok(text.includes("# HELP solver_skips_total"));
+  assert.ok(text.includes("# TYPE solver_skips_total counter"));
+});
+
+test("toPrometheusText properly escapes quotes, backslashes, and newlines in label values", () => {
+  const m = new SolverMetrics();
+  m.recordSkip('error: "unexpected"\nline 2\\path');
+  const text = m.toPrometheusText();
+  assert.ok(text.includes('reason="error: \\"unexpected\\"\\nline 2\\\\path"'));
+});
+
+test("skipReasons cardinality is bounded", () => {
+  const m = new SolverMetrics();
+  for (let i = 0; i < 150; i++) {
+    m.recordSkip(`reason_${i}`);
+  }
+  const snap = m.snapshot();
+  assert.ok(Object.keys(snap.skipReasons).length <= 101);
+  assert.ok(snap.skipReasons["other"] !== undefined);
+});

@@ -558,7 +558,7 @@ export class Solver {
       } else {
         this.log.info("skipping intent", { hash, reason: decision.reason });
       }
-      this.metrics?.recordSkip(decision.reason);
+      this.metrics?.recordSkip(decision.code ?? decision.reason);
       // Terminal: this intent will never become fillable (wrong chain,
       // expired, unsupported asset, reserved for another solver, ...).
       // Without this, evaluate() re-derives the same terminal verdict
