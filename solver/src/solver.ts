@@ -18,7 +18,7 @@ import {
 import type { SolverConfig } from "./config.js";
 import { evaluate, type PricingDeps, type NativeCostDeps } from "./quote.js";
 import { BackoffState } from "./backoff.js";
-import type { Metrics } from "./metrics.js";
+import type { Metrics, FillFees } from "./metrics.js";
 import type { InventoryProvider } from "./inventory.js";
 import { InFlightTracker } from "./inventory.js";
 import { SeenLRU } from "./seen-lru.js";
@@ -29,9 +29,9 @@ export interface Executor {
   /**
    * Lock the user's source funds in the EVM escrow against the intent hash and
    * release the destination assets on Stellar once the LayerZero message is
-   * confirmed. Returns the Stellar settlement tx hash.
+   * confirmed. Returns the Stellar settlement tx hash and optional fee breakdown.
    */
-  fill(signed: SignedIntent): Promise<{ settlementTx: string }>;
+  fill(signed: SignedIntent): Promise<{ settlementTx: string; fees?: FillFees }>;
 }
 
 /** Minimal logger interface so callers can inject structured logging. */
@@ -577,7 +577,8 @@ export class Solver {
     let fillSucceeded = false;
     let caughtErr: unknown = undefined;
     try {
-      const { settlementTx } = await this.executor.fill(record);
+      const settlement = await this.executor.fill(record);
+      const { settlementTx } = settlement;
       fillSucceeded = true;
       this.log.info("filled", { hash, settlementTx });
       this.metrics?.recordFillWon(
@@ -585,6 +586,13 @@ export class Solver {
         BigInt(intent.minDestAmount),
         decision.profitBps ?? 0,
       );
+      if (settlement.fees) {
+        if (this.metrics?.recordFees) {
+          this.metrics.recordFees(settlement.fees);
+        } else if (settlement.fees.sourceGasWei) {
+          this.metrics?.recordFee(settlement.fees.sourceGasWei);
+        }
+      }
       // Terminal: filled successfully.
       this.seen.add(hash, deadlineMs);
       this.retryState.delete(hash);
