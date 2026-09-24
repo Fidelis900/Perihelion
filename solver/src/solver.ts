@@ -42,6 +42,22 @@ export interface Logger {
 }
 
 /**
+ * Readiness snapshot for the solver health/readiness server.
+ */
+export interface SolverReadinessState {
+  /** True if the last tick completed without throwing. */
+  lastTickOk: boolean;
+  /** Timestamp (ms since epoch) of the last successful tick, or 0 if none yet. */
+  lastTickAt: number;
+  /** Number of consecutive tick failures. */
+  consecutiveFailures: number;
+  /** Current size of the seen-set cache. */
+  seenCount: number;
+  /** Current size of the retry-state cache. */
+  retryStateCount: number;
+}
+
+/**
  * Signature-verification seam. Defaults to the SDK's {@link verifyIntent};
  * injectable so tests can drive verification outcomes and count invocations
  * (the ESM namespace itself is frozen and cannot be monkeypatched).
@@ -319,6 +335,15 @@ export class Solver {
   /** Resolves an in-progress interruptibleSleep early when stop() is called. */
   private abortSleep: (() => void) | null = null;
 
+  /** Readiness state snapshot for orchestrator checks. */
+  readonly readiness: SolverReadinessState = {
+    lastTickOk: false,
+    lastTickAt: 0,
+    consecutiveFailures: 0,
+    seenCount: 0,
+    retryStateCount: 0,
+  };
+
   constructor(
     private readonly config: SolverConfig,
     private readonly executor: Executor,
@@ -354,7 +379,16 @@ export class Solver {
       try {
         await this.tick();
         this.backoff.recordSuccess();
+        this.readiness.lastTickOk = true;
+        this.readiness.lastTickAt = Date.now();
+        this.readiness.consecutiveFailures = 0;
+        this.readiness.seenCount = this.seen.size();
+        this.readiness.retryStateCount = this.retryState.size();
       } catch (err) {
+        this.readiness.lastTickOk = false;
+        this.readiness.consecutiveFailures = this.backoff.consecutiveFailures + 1;
+        this.readiness.seenCount = this.seen.size();
+        this.readiness.retryStateCount = this.retryState.size();
         if (err instanceof FatalError) {
           this.log.error("fatal error, solver stopping", { err: String(err) });
           throw err;
