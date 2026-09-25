@@ -111,15 +111,15 @@ export class Executor {
   private readonly stellarNetwork: string;
   private readonly logger: Logger;
 
-  constructor(config: ExecutorConfig, logger: Logger = console) {
-    this.evmRpcUrl = config.evmRpcUrl;
-    this.sorobanRpcUrl = config.sorobanRpcUrl;
-    this.evmPrivateKey = config.evmPrivateKey;
-    this.sorobanSecretKey = config.sorobanSecretKey;
-    this.escrowAddress = config.escrowAddress;
-    this.settlementContractId = config.settlementContractId;
-    this.sourceChainId = config.sourceChainId;
-    this.stellarNetwork = config.stellarNetwork;
+  constructor(config?: ExecutorConfig, logger: Logger = console) {
+    this.evmRpcUrl = config?.evmRpcUrl ?? "";
+    this.sorobanRpcUrl = config?.sorobanRpcUrl ?? "";
+    this.evmPrivateKey = config?.evmPrivateKey ?? ("0x" as Hex);
+    this.sorobanSecretKey = config?.sorobanSecretKey ?? "";
+    this.escrowAddress = config?.escrowAddress ?? ("0x" as `0x${string}`);
+    this.settlementContractId = config?.settlementContractId ?? "";
+    this.sourceChainId = config?.sourceChainId ?? 0;
+    this.stellarNetwork = config?.stellarNetwork ?? "";
     this.logger = logger;
   }
 

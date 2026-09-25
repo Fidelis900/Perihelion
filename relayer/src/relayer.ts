@@ -168,6 +168,11 @@ export interface ReadinessState {
   lag: number;
 }
 
+interface MessageRetryState {
+  attempts: number;
+  nextRetryAt: number;
+}
+
 export class Relayer {
   private running = false;
   private cursor: number;
@@ -175,8 +180,8 @@ export class Relayer {
 
   // --- Internal state -------------------------------------------------------
 
-  /** Retry attempt counters per message composite key. */
-  private readonly attempts = new Map<string, number>();
+  /** Retry attempt bookkeeping per message composite key. */
+  private readonly attempts = new Map<string, MessageRetryState>();
 
   /** Counters exposed via the health/metrics endpoints. */
   readonly metrics: RelayMetrics = {
@@ -394,6 +399,18 @@ export class Relayer {
       return { intentHash, key, delivered: false, resolved: true, error: "dead-lettered" };
     }
 
+    // Skip retry if backoff delay has not yet elapsed.
+    const retryState = this.attempts.get(keyStr);
+    if (retryState && Date.now() < retryState.nextRetryAt) {
+      return {
+        intentHash,
+        key,
+        delivered: false,
+        resolved: false,
+        error: `retry deferred until ${retryState.nextRetryAt}`,
+      };
+    }
+
     try {
       if (await this.delivery.isDelivered(key)) {
         this.log.info("already delivered, skipping", {
@@ -415,8 +432,12 @@ export class Relayer {
     } catch (err) {
       if (err instanceof FatalError) throw err;
 
-      const attempt = (this.attempts.get(keyStr) ?? 0) + 1;
-      this.attempts.set(keyStr, attempt);
+      const attempt = (retryState?.attempts ?? 0) + 1;
+      const backoff = this.retry.baseBackoffMs * Math.pow(2, attempt - 1);
+      this.attempts.set(keyStr, {
+        attempts: attempt,
+        nextRetryAt: Date.now() + backoff,
+      });
       this.metrics.maxRetryDepth = Math.max(this.metrics.maxRetryDepth, attempt);
 
       if (attempt >= this.retry.maxAttempts) {
@@ -444,8 +465,6 @@ export class Relayer {
         };
       }
 
-      // Backoff before next tick picks it up.
-      const backoff = this.retry.baseBackoffMs * Math.pow(2, attempt - 1);
       this.metrics.failed += 1;
       this.log.warn("delivery failed, will retry", {
         intentHash,
@@ -455,7 +474,6 @@ export class Relayer {
         backoffMs: backoff,
         err: String(err),
       });
-      await sleep(backoff);
       return { intentHash, key, delivered: false, resolved: false, error: String(err) };
     }
   }
