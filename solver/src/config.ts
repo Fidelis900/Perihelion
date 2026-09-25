@@ -48,6 +48,11 @@ export interface SolverConfig {
    */
   readonly seenCacheSize?: number;
   /**
+   * Maximum number of entries to keep in the retry-state LRU+TTL cache.
+   * Defaults to 10,000.
+   */
+  readonly retryCacheSize?: number;
+  /**
    * Shared bearer token for the mempool's `PATCH /intents/:hash/status`
    * endpoint. When set, the solver reports `"settled"` after a successful
    * fill so the mempool record transitions out of `"pending"` immediately.
@@ -153,6 +158,13 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): SolverConfig {
     );
   }
 
+  const retryCacheSize = Number(env.PERIHELION_RETRY_CACHE_SIZE ?? 10_000);
+  if (!Number.isInteger(retryCacheSize) || retryCacheSize <= 0) {
+    errors.push(
+      `PERIHELION_RETRY_CACHE_SIZE must be a positive integer, got: "${env.PERIHELION_RETRY_CACHE_SIZE}"`,
+    );
+  }
+
   const sourceNativeFeeFloor = parseNonNegativeBigInt(
     env.PERIHELION_SOURCE_NATIVE_FEE_FLOOR,
     "PERIHELION_SOURCE_NATIVE_FEE_FLOOR",
@@ -170,6 +182,29 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): SolverConfig {
     .filter(Boolean);
   if (supportedDestAssets.length === 0) {
     errors.push("PERIHELION_SUPPORTED_ASSETS must list at least one asset");
+  }
+
+  // --- Optional: mempool URL (defaults to localhost dev server) ---
+  const rawMempoolUrl = env.PERIHELION_MEMPOOL_URL ?? "http://localhost:3000";
+  let mempoolUrl = rawMempoolUrl;
+  try {
+    const parsed = new URL(rawMempoolUrl);
+    if (
+      parsed.protocol === "http:" &&
+      parsed.hostname !== "localhost" &&
+      parsed.hostname !== "127.0.0.1" &&
+      parsed.hostname !== "::1"
+    ) {
+      console.warn(
+        "PERIHELION_MEMPOOL_URL uses http:// with a non-loopback host — " +
+          "bearer tokens sent to reportStatus will be transmitted in clear text. " +
+          "Use https:// in production.",
+      );
+    }
+  } catch {
+    errors.push(
+      `PERIHELION_MEMPOOL_URL must be a valid URL, got: "${rawMempoolUrl}"`,
+    );
   }
 
   // --- Optional: status token for mempool PATCH /intents/:hash/status ---
@@ -196,6 +231,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): SolverConfig {
     verificationCacheSize,
     fillConcurrency,
     seenCacheSize,
+    retryCacheSize,
     mempoolStatusToken,
   };
 }
